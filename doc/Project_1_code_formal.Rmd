@@ -1,0 +1,564 @@
+---
+title: "Relationship between Topics of Inaugural Speeches and One-Month Stock Market"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Part 1: Abstract
+
+In the history of more than 200 years in the United States, there are nearly 60 presidential inaugural addresses. These inaugural speeches not only summarized the historical situation at that time, but also reflected the various aspects of the United States. In this project, I explored the relationship between the topics of the inaugural speeches and the one-month stock market return after the speech. The tools I utilized for natural language processing are sentiment analysis and topic modeling.
+
+# Part 2: Data Preparation
+
+#### Step 0: check and install needed packages. Load the libraries and functions. 
+```{r, message=FALSE, warning=FALSE}
+packages.used=c("rvest", "tibble", "qdap", 
+                "sentimentr", "gplots", "dplyr",
+                "tm", "syuzhet", "factoextra", 
+                "beeswarm", "scales", "RColorBrewer",
+                "RANN", "tm", "topicmodels","stringi","tm",
+                "LDAvis","RJSONIO","servr","wordcloud","tidytext")
+
+# check packages that need to be installed.
+packages.needed=setdiff(packages.used, 
+                        intersect(installed.packages()[,1], 
+                                  packages.used))
+# install additional packages
+if(length(packages.needed)>0){
+  install.packages(packages.needed, dependencies = TRUE)
+}
+
+# load packages
+library("rvest")
+library("tibble")
+library("qdap")
+library("sentimentr")
+library("gplots")
+library("dplyr")
+library("tm")
+library("syuzhet")
+library("factoextra")
+library("beeswarm")
+library("scales")
+library("RColorBrewer")
+library("RANN")
+library("tm")
+library("topicmodels")
+library("reshape2")
+library("stringi")
+library("tm")
+library("LDAvis")
+library("RJSONIO")
+library("servr")
+library("purrr")
+library("wordcloud")
+library("tidytext")
+
+source("../lib/plotstacked.R") # cite the outside fn of ploting fn
+source("../lib/speechFuncs.R") # cite the outside fn of processing implement fn
+```
+
+#### Step 1: Data harvest: scrap speech URLs from <http://www.presidency.ucsb.edu/>.
+
+Following the example of [Jerid Francom](https://francojc.github.io/2015/03/01/web-scraping-with-rvest-in-r/), I used [Selectorgadget](http://selectorgadget.com/) to choose the links I would like to scrap. For this project, I selected all inaugural addresses of past presidents, nomination speeches of major party candidates and farewell addresses. I also included several public speeches from Donald Trump for our textual analysis of presidential speeches. 
+
+```{r, message=FALSE, warning=FALSE}
+#### Inauguaral speeches
+main.page <- read_html(x = "http://www.presidency.ucsb.edu/inaugurals.php")
+# Get link URLs
+# f.speechlinks is a function for extracting links from the list of speeches. 
+inaug=f.speechlinks(main.page)
+head(inaug)
+as.Date(inaug[,1], format="%B %e, %Y")
+inaug=inaug[-nrow(inaug),] # remove the last line, irrelevant due to error.
+
+###### Nomination speeches
+main.page=read_html("http://www.presidency.ucsb.edu/nomination.php")
+# Get link URLs
+nomin <- f.speechlinks(main.page)
+head(nomin)
+#
+###### Farewell speeches
+main.page=read_html("http://www.presidency.ucsb.edu/farewell_addresses.php")
+# Get link URLs
+farewell <- f.speechlinks(main.page)
+head(farewell)
+```
+
+### Step 2: Using speech metadata posted on <http://www.presidency.ucsb.edu/>, I prepared CSV data sets for the speeches we will scrap. 
+
+```{r}
+inaug.list=read.csv("../data/inauglist.csv", stringsAsFactors = FALSE)
+nomin.list=read.csv("../data/nominlist.csv", stringsAsFactors = FALSE)
+farewell.list=read.csv("../data/farewelllist.csv", stringsAsFactors = FALSE)
+```
+
+I assemble all scrapped speeches into one list.
+
+### Step 3: scrap the texts of speeches from the speech URLs.
+
+```{r}
+nomin <- nomin[-47,]
+speech.list=rbind(inaug.list, nomin.list, farewell.list)
+speech.list$type=c(rep("inaug", nrow(inaug.list)),
+                   rep("nomin", nrow(nomin.list)),
+                   rep("farewell", nrow(farewell.list)))
+speech.url=rbind(inaug, nomin, farewell)
+speech.list=cbind(speech.list, speech.url)
+```
+
+Based on the list of speeches, I scrap the main text part of the transcript's html page. For simple html pages of this kind,  [Selectorgadget](http://selectorgadget.com/) is very convenient for identifying the html node that `rvest` can use to scrap its content. For reproducibility, I also save our scrapped speeches into our local folder as individual speech files. 
+
+```{r}
+# Loop over each row in speech.list
+library("rvest")
+speech.list$fulltext=NA
+colnames(speech.list)[1] <- "President"
+for(i in seq(nrow(speech.list))) {
+  text <- read_html(speech.list$urls[i]) %>% # load the page
+    html_nodes(".displaytext") %>% # isloate the text
+    html_text() # get the text
+  speech.list$fulltext[i]=text
+  # Create the file name
+  filename <- paste0("../data/fulltext/", 
+                     speech.list$type[i],
+                     speech.list$File[i], "-", 
+                     speech.list$Term[i], ".txt")
+  sink(file = filename) %>% # open file to write 
+  cat(text)  # write the file
+  sink() # close the file
+}
+```
+
+Trump, as president-elect that has not been a politician, do not have a lot of formal speeches yet. For our textual analysis, we manually add several public transcripts from Trump:
++ [Transcript: Donald Trump's full immigration speech, annotated. LA Times, 08/31/2016](http://www.latimes.com/politics/la-na-pol-donald-trump-immigration-speech-transcript-20160831-snap-htmlstory.html)
++ [Transcript of Donald Trump’s speech on national security in Philadelphia - The Hill, 09/07/16](http://thehill.com/blogs/pundits-blog/campaign/294817-transcript-of-donald-trumps-speech-on-national-security-in)
++ [Transcript of President-elect Trump's news conference
+CNBC, 01/11/2017](http://www.cnbc.com/2017/01/11/transcript-of-president-elect-donald-j-trumps-news-conference.html)
+
+```{r}
+speech1=paste(readLines("../data/fulltext/SpeechDonaldTrump-NA.txt", 
+                  n=-1, skipNul=TRUE),
+              collapse=" ")
+speech2=paste(readLines("../data/fulltext/SpeechDonaldTrump-NA2.txt", 
+                  n=-1, skipNul=TRUE),
+              collapse=" ")
+speech3=paste(readLines("../data/fulltext/PressDonaldTrump-NA.txt", 
+                  n=-1, skipNul=TRUE),
+              collapse=" ")
+
+Trump.speeches=data.frame(
+  President=rep("Donald J. Trump", 3),
+  File=rep("DonaldJTrump", 3),
+  Term=rep(0, 3),
+  Party=rep("Republican", 3),
+  Date=c("August 31, 2016", "September 7, 2016", "January 11, 2017"),
+  Words=c(word_count(speech1), word_count(speech2), word_count(speech3)),
+  Win=rep("yes", 3),
+  type=rep("speeches", 3),
+  links=rep(NA, 3),
+  urls=rep(NA, 3),
+  fulltext=c(speech1, speech2, speech3)
+)
+
+speech.list=rbind(speech.list, Trump.speeches)
+```
+
+### Step 4: data Processing --- generate list of sentences
+
+I will use sentences as units of analysis for this project, as sentences are natural languge units for organizing thoughts and ideas. For each extracted sentence, we apply sentiment analysis using [NRC sentiment lexion](http://saifmohammad.com/WebPages/NRC-Emotion-Lexicon.htm). "The NRC Emotion Lexicon is a list of English words and their associations with eight basic emotions (anger, fear, anticipation, trust, surprise, sadness, joy, and disgust) and two sentiments (negative and positive). The annotations were manually done by crowdsourcing."
+
+I assign an sequential id to each sentence in a speech (`sent.id`) and also calculated the number of words in each sentence as *sentence length* (`word.count`).
+
+```{r, message=FALSE, warning=FALSE}
+sentence.list=NULL
+for(i in 1:nrow(speech.list)){
+  sentences=sent_detect(speech.list$fulltext[i],
+                        endmarks = c("?", ".", "!", "|",";"))
+  if(length(sentences)>0){
+    emotions=get_nrc_sentiment(sentences)
+    word.count=word_count(sentences)
+    # colnames(emotions)=paste0("emo.", colnames(emotions))
+    # in case the word counts are zeros?
+    emotions=diag(1/(word.count+0.01))%*%as.matrix(emotions)
+    sentence.list=rbind(sentence.list, 
+                        cbind(speech.list[i,-ncol(speech.list)],
+                              sentences=as.character(sentences), 
+                              word.count,
+                              emotions,
+                              sent.id=1:length(sentences)
+                              )
+    )
+  }
+}
+
+```
+
+Some non-sentences exist in raw data due to erroneous extra end-of-sentence marks. 
+```{r}
+sentence.list=
+  sentence.list%>%
+  filter(!is.na(word.count)) 
+```
+
+
+### Step 5: generate list of sentences
+
+```{r}
+corpus.list=sentence.list[2:(nrow(sentence.list)-1), ]
+sentence.pre=sentence.list$sentences[1:(nrow(sentence.list)-2)]
+sentence.post=sentence.list$sentences[3:(nrow(sentence.list)-1)]
+corpus.list$snipets=paste(sentence.pre, corpus.list$sentences, sentence.post, sep=" ")
+rm.rows=(1:nrow(corpus.list))[corpus.list$sent.id==1]
+rm.rows=c(rm.rows, rm.rows-1)
+corpus.list=corpus.list[-rm.rows, ]
+```
+
+### Step 6: extract stock market return
+
+I used S&P 500 on behalf of the stock market return. The data, which is availible from 1950, is downloaded from Yahoo Finance. I computed the monthly rate of return and integrated them to the speechlist.
+
+```{r}
+getwd()
+setwd("C:/Users/KevinZhang/Documents/GitHub/Spring2018-Project1-szzjunk/doc")
+
+# presidents after 1950
+presidents.after1950 <- c("DwightDEisenhower","JohnFKennedy","LyndonBJohnson","RichardNixon"
+                          ,"JimmyCarter","RonaldReagan","GeorgeBush","WilliamJClinton"
+                          ,"GeorgeWBush","BarackObama","DonaldJTrump")
+
+# inaug list after 1950
+inaug.list.after1950=tbl_df(speech.list)%>%
+  filter(type%in%c("inaug"), File%in%presidents.after1950)%>%
+  select(File,Term,Party,Words,Date)
+inaug.list.after1950$Date <- as.numeric(inaug.list.after1950$Date)
+inaug.list.after1950$Date <- as.Date(inaug.list.after1950$Date,origin = "1900-01-01")
+
+# monthly rtn data of SnP500
+snp500.rtn <- read.csv("^GSPC.csv",header = TRUE,as.is = TRUE)
+snp500.rtn.monthly <- as.data.frame((snp500.rtn[21:nrow(snp500.rtn),]$Close
+                                   -snp500.rtn[1:(nrow(snp500.rtn)-20),]$Close)
+                                   /snp500.rtn[1:(nrow(snp500.rtn)-20),]$Close) 
+snp500.rtn.monthly$date <- snp500.rtn[21:nrow(snp500.rtn),"Date"]
+colnames(snp500.rtn.monthly) <- c("rtn","date")
+
+# integrate the inaug.list.after1950 and snp500.rtn.monthly
+inaug.date <- inaug.list.after1950$Date + 28
+snp500.rtn.monthly$date <- as.numeric(snp500.rtn.monthly$date)
+snp500.rtn.monthly$date <- as.Date(snp500.rtn.monthly$date,origin = "1900-01-01")
+mode(snp500.rtn.monthly$date)
+inaug.list.after1950$stock_mkt_rtn <- NA
+
+# For the following loop, it is used to deal with inaugural addresses in weekends or holidays.
+for (i in 1:length(inaug.date)){
+  if (sum(snp500.rtn.monthly$date == inaug.date[i])==1){
+    inaug.list.after1950[i,"stock_mkt_rtn"] <- 
+      snp500.rtn.monthly[(1:nrow(snp500.rtn.monthly))[snp500.rtn.monthly$date == inaug.date[i]],"rtn"]
+  }else{
+    if (sum(snp500.rtn.monthly$date == (inaug.date[i]+1))==1){
+      inaug.list.after1950[i,"stock_mkt_rtn"] <- 
+        snp500.rtn.monthly[(1:nrow(snp500.rtn.monthly))[snp500.rtn.monthly$date == (inaug.date[i]+1)],"rtn"]
+    }else{
+      if (sum(snp500.rtn.monthly$date == (inaug.date[i]+2))==1){
+        inaug.list.after1950[i,"stock_mkt_rtn"] <- 
+          snp500.rtn.monthly[(1:nrow(snp500.rtn.monthly))[snp500.rtn.monthly$date == (inaug.date[i]+2)],"rtn"]
+      }else{
+        inaug.list.after1950[i,"stock_mkt_rtn"] <- 
+      snp500.rtn.monthly[(1:nrow(snp500.rtn.monthly))[snp500.rtn.monthly$date == (inaug.date[i]+3)],"rtn"]
+      }
+    }
+  }
+}
+head(inaug.list.after1950)
+
+# divide the speech list into two group by rtn
+inaug.list.after1950.positive <- inaug.list.after1950[inaug.list.after1950[,"stock_mkt_rtn"] >= 0,]
+inaug.list.after1950.negative <- inaug.list.after1950[inaug.list.after1950[,"stock_mkt_rtn"] < 0,]
+```
+
+# Part 3: Data Analysis
+
+In this part, I employed topic model with two inaugural speeches grouped by positive and negative monthly rate of return, compared their differences by utilizing heatmap and visualized the data by using LDAvis package.
+
+### Step 0: Data Preparation for Topic Modeling of Two Groups
+
+```{r}
+# Topic modeling
+corpus.list=sentence.list[2:(nrow(sentence.list)-1), ]
+sentence.pre=sentence.list$sentences[1:(nrow(sentence.list)-2)]
+sentence.post=sentence.list$sentences[3:(nrow(sentence.list)-1)]
+corpus.list$snipets=paste(sentence.pre, corpus.list$sentences, sentence.post, sep=" ")
+rm.rows=(1:nrow(corpus.list))[corpus.list$sent.id==1]
+rm.rows=c(rm.rows, rm.rows-1)
+corpus.list=corpus.list[-rm.rows, ]
+
+# LDA for speech with 1 month positive return
+corpus.list.positive <- tbl_df(corpus.list)%>%
+  filter( File%in%inaug.list.after1950.positive$File,type%in%c("inaug"))  # %in% have to match with vector
+
+docs.positive <- Corpus(VectorSource(corpus.list.positive$snipets))
+writeLines(as.character(docs.positive[[sample(1:nrow(corpus.list.positive), 1)]]))
+
+# Remove potentially problematic symbols
+docs.positive <-tm_map(docs.positive,content_transformer(tolower))
+
+# Remove punctuation
+docs.positive <- tm_map(docs.positive, removePunctuation)
+
+# Strip digits
+docs.positive <- tm_map(docs.positive, removeNumbers)
+
+# Remove stopwords
+docs.positive <- tm_map(docs.positive, removeWords, stopwords("english"))
+
+# Remove whitespace
+docs.positive <- tm_map(docs.positive, stripWhitespace)
+
+# Stem document
+docs.positive <- tm_map(docs.positive,stemDocument)
+writeLines(as.character(docs.positive[[sample(1:nrow(corpus.list.positive), 1)]]))
+
+dtm.positive <- DocumentTermMatrix(docs.positive)
+
+# Convert rownames to filenames
+rownames(dtm.positive) <- paste(corpus.list.positive$type, corpus.list.positive$File,
+                                corpus.list.positive$Term, corpus.list.positive$sent.id, sep="_")
+
+rowTotals <- apply(dtm.positive , 1, sum) #Find the sum of words in each Document
+
+dtm.positive  <- dtm.positive[rowTotals> 0, ]
+corpus.list.positive=corpus.list.positive[rowTotals>0, ]
+
+
+
+# LDA for speech with 1 month negative return
+corpus.list.negative <- tbl_df(corpus.list)%>%
+  filter( File%in%inaug.list.after1950.negative$File,type%in%c("inaug"))  # %in% have to match with vector
+
+docs.negative <- Corpus(VectorSource(corpus.list.negative$snipets))
+writeLines(as.character(docs.negative[[sample(1:nrow(corpus.list.negative), 1)]]))
+
+#remove potentially problematic symbols
+docs.negative <-tm_map(docs.negative,content_transformer(tolower))
+
+#remove punctuation
+docs.negative <- tm_map(docs.negative, removePunctuation)
+writeLines(as.character(docs.negative[[sample(1:nrow(corpus.list.negative), 1)]]))
+
+#Strip digits
+docs.negative <- tm_map(docs.negative, removeNumbers)
+
+#remove stopwords
+docs.negative <- tm_map(docs.negative, removeWords, stopwords("english"))
+
+#remove whitespace
+docs.negative <- tm_map(docs.negative, stripWhitespace)
+
+
+#Stem document
+docs.negative <- tm_map(docs.negative,stemDocument)
+writeLines(as.character(docs.negative[[sample(1:nrow(corpus.list.negative), 1)]]))
+
+dtm.negative <- DocumentTermMatrix(docs.negative)
+
+#convert rownames to filenames#convert rownames to filenames
+rownames(dtm.negative) <- paste(corpus.list.negative$type, corpus.list.negative$File,
+                                corpus.list.negative$Term, corpus.list.negative$sent.id, sep="_")
+
+rowTotals <- apply(dtm.negative , 1, sum) #Find the sum of words in each Document
+
+dtm.negative  <- dtm.negative[rowTotals> 0, ]
+corpus.list.negative=corpus.list.negative[rowTotals>0, ]
+```
+
+### Step 1: Topic Modeling by Using LDA() Function
+
+```{r}
+#Set parameters for Gibbs sampling
+burnin <- 4000     # The first burnin iterations are discarded
+iter <- 2000
+thin <- 500        # Every thin iteration is returned for iter iterations
+seed <-list(2003,5,63,100001,765)    # needs to have the length nstart 
+nstart <- 5        # Indicates the number of repeated runs with random initializations
+best <- TRUE       # If best=TRUE only the best model over all runs with respect to the log-likelihood is returned.
+
+#Number of topics
+k <- 15
+
+#Run LDA using Gibbs sampling
+ldaOut.positive <-LDA(dtm.positive, k, method="Gibbs", control=list(nstart=nstart, seed = seed,
+                                                                    best=best, burnin = burnin,
+                                                                    iter = iter, thin=thin))
+
+#write out results of ldaOut.positive
+#docs to topics
+ldaOut.topics.positive <- as.matrix(topics(ldaOut.positive))
+table(c(1:k, ldaOut.topics.positive))
+write.csv(ldaOut.topics.positive,file=paste("../output/LDAGibbs",k,"DocsToTopicsPositive.csv"))
+
+#top 20 terms in each topic
+ldaOut.terms.positive <- as.matrix(terms(ldaOut.positive,20))
+write.csv(ldaOut.terms.positive,file=paste("../output/LDAGibbs",k,"TopicsToTermsPositive.csv"))
+
+#probabilities associated with each topic assignment
+topicProbabilities.positive <- as.data.frame(ldaOut.positive@gamma)
+write.csv(topicProbabilities.positive,file=paste("../output/LDAGibbs",k,"TopicProbabilitiesPositive.csv"))
+
+terms.beta.positive=ldaOut.positive@beta
+terms.beta.positive=scale(terms.beta.positive)
+
+topics.terms.positive=NULL
+for(i in 1:k){
+  topics.terms.positive=rbind(topics.terms.positive, ldaOut.positive@terms[order(terms.beta.positive[i,], decreasing = TRUE)[1:7]])
+}
+topics.terms.positive
+ldaOut.terms.positive
+
+# Assign hash to each topic
+# Based on the most popular terms and the most salient terms for each topic, we assign a hashtag to each topic.
+topics.hash.positive=c("dream", "unity", "family", "equal", "defense", "world", 
+                       "reform", "opportunity", "life", "economy", "wealth", "happiness", 
+                       "achievement", "peace", "citizen")
+corpus.list.positive$ldatopic=as.vector(ldaOut.topics.positive)
+corpus.list.positive$ldahash=topics.hash.positive[ldaOut.topics.positive]
+
+colnames(topicProbabilities.positive)=topics.hash.positive
+corpus.list.df.positive=cbind(corpus.list.positive, topicProbabilities.positive)
+
+
+
+#Run LDA using Gibbs sampling
+ldaOut.negative <-LDA(dtm.negative, k, method="Gibbs", control=list(nstart=nstart, 
+                                                                    seed = seed, best=best,
+                                                                    burnin = burnin, iter = iter, 
+                                                                    thin=thin))
+#write out results of ldaOut.negative
+#docs to topics
+ldaOut.topics.negative <- as.matrix(topics(ldaOut.negative))
+table(c(1:k, ldaOut.topics.negative))
+write.csv(ldaOut.topics.negative,file=paste("../output/LDAGibbs",k,"DocsToTopicsNegative.csv"))
+
+#top 20 terms in each topic
+ldaOut.terms.negative <- as.matrix(terms(ldaOut.negative,20))
+write.csv(ldaOut.terms.negative,file=paste("../output/LDAGibbs",k,"TopicsToTermsNegative.csv"))
+
+#probabilities associated with each topic assignment
+topicProbabilities.negative <- as.data.frame(ldaOut.negative@gamma)
+write.csv(topicProbabilities.negative,file=paste("../output/LDAGibbs",k,"TopicProbabilitiesNegative.csv"))
+
+terms.beta.negative=ldaOut.negative@beta
+terms.beta.negative=scale(terms.beta.negative)
+topics.terms.negative=NULL
+for(i in 1:k){
+  topics.terms.negative=rbind(topics.terms.negative, ldaOut.negative@terms[order(terms.beta.negative[i,], decreasing = TRUE)[1:7]])
+}
+topics.terms.negative
+ldaOut.terms.negative
+
+# assign hash to each topic
+topics.hash.negative=c("freedom", "family", "american", "problem", "peace", "economy", 
+                       "unity", "threat", "faith", "citizen", "nation", "reform", 
+                       "history", "human", "life")
+corpus.list.negative$ldatopic=as.vector(ldaOut.topics.negative)
+corpus.list.negative$ldahash=topics.hash.negative[ldaOut.topics.negative]
+
+colnames(topicProbabilities.negative)=topics.hash.negative
+corpus.list.df.negative=cbind(corpus.list.negative, topicProbabilities.negative)
+```
+
+### Step 2: Cluster Plot by K means method
+
+```{r}
+presid.summary.positive=tbl_df(corpus.list.df.positive)%>%
+  select(File, dream:citizen)%>%
+  group_by(File)%>%
+  summarise_all(funs(mean))
+
+presid.summary.positive=as.data.frame(presid.summary.positive)
+rownames(presid.summary.positive)=as.character((presid.summary.positive[,1]))
+km.res=kmeans(scale(presid.summary.positive[,-1]), iter.max=200,
+              3)
+fviz_cluster(km.res, 
+             stand=T, repel= TRUE,
+             data = presid.summary.positive[,-1],
+             show.clust.cent=FALSE)
+```
+
+For the above plot, I used the topic data generated by the topic model to cluster the eight presidents. As can be seen from the picture, the grouping is in line with the president's term and party affiliation.
+
+### Step 3: Heatmap Analysis
+
+In this section, I used the heatmap function to plot the relationship between presidents and topics. The dark red part of the picture is the highlight of its inaugural address.
+
+```{r}
+# heatmap for the positive return group
+topic.summary=tbl_df(corpus.list.df.positive)%>%
+  select(File, dream:citizen)%>%
+  group_by(File)%>%
+  summarise_all(funs(mean))
+topic.plot <- c(1:15)
+print(topics.hash.positive[topic.plot])
+heatmap.2(as.matrix(topic.summary[,topic.plot+1]), 
+          scale = "column", key=T, 
+          col = bluered(100),
+          cexRow = 0.9, cexCol = 0.9, margins = c(8, 8),
+          trace = "none", density.info = "none")
+```
+
+In the picture above, it can be summarized as the topics of wealth, happiness, family, life and reform being mentioned by multiple presidents in their inaugural addresses. These topics are rational in the economic sense, and can also be measured as indicators of positive stock market returns in the time period after the inaugural speech.
+
+```{r}
+# heatmap for the negative return group
+topic.summary=tbl_df(corpus.list.df.negative)%>%
+  select(File, freedom:life)%>%
+  group_by(File)%>%
+  summarise_all(funs(mean))
+topic.plot <- c(1:15)
+print(topics.hash.negative[topic.plot])
+heatmap.2(as.matrix(topic.summary[,topic.plot+1]), 
+          scale = "column", key=T, 
+          col = bluered(100),
+          cexRow = 0.9, cexCol = 0.9, margins = c(9, 9),
+          trace = "none", density.info = "none")
+```
+
+In the figure above, it can be concluded that the topics of peace, threat and problem mentioned by many presidents in their inaugural addresses may indicate the concern about the situation of world and the United States. These topics are logically reasonable and can be used as an indicator of the negative return on stock market.
+
+### Step 4: Interactive Visualization of LDA model by using LDAvis Package
+
+Following the example of [Christopher Gandrud](https://gist.github.com/christophergandrud/00e7451c16439421b24a#file-topicmodels_json_ldavis-r), I visualized the data generated by the LDA model using the LDAvis package. In this section, removing pound sign before serVis function can open the webpage of Interactive Visualization. 
+
+```{r}
+# LDAvis Interactive Visualization of Positive Return Group
+phi <- posterior(ldaOut.positive)$terms %>% as.matrix
+theta <- posterior(ldaOut.positive)$topics %>% as.matrix
+vocab <- colnames(phi)
+doc_length <- c(stri_count(corpus.list.positive$snipets, regex = '\\S+'))
+temp_frequency <- as.matrix(dtm.positive)
+freq_matrix <- data.frame(ST = colnames(temp_frequency),
+                          Freq = colSums(temp_frequency))
+# Convert to json
+json_lda.positive <- LDAvis::createJSON(phi = phi, theta = theta,
+                               vocab = vocab,
+                               doc.length = doc_length,
+                               term.frequency = freq_matrix$Freq)
+#serVis(json_lda.positive,  open.browser = TRUE)    # remove pound sign to see the webpage of Interactive Visualization
+
+# LDAvis Interactive Visualization of Negative Return Group
+phi <- posterior(ldaOut.negative)$terms %>% as.matrix
+theta <- posterior(ldaOut.negative)$topics %>% as.matrix
+vocab <- colnames(phi)
+doc_length <- c(stri_count(corpus.list.negative$snipets, regex = '\\S+'))
+temp_frequency <- as.matrix(dtm.negative)
+freq_matrix <- data.frame(ST = colnames(temp_frequency),
+                          Freq = colSums(temp_frequency))
+# Convert to json
+json_lda.negative <- LDAvis::createJSON(phi = phi, theta = theta,
+                               vocab = vocab,
+                               doc.length = doc_length,
+                               term.frequency = freq_matrix$Freq)
+#serVis(json_lda.negative,  open.browser = TRUE)    # remove pound sign to see the webpage of Interactive Visualization
+```
+
+In the Interactive Visualization webpages, we can see Overall term frequency and Estimated term frequency within the selected topic.
